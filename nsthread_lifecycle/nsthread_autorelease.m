@@ -12,12 +12,31 @@
   NSCondition *_condition;
 }
 
+- (instancetype)init
+{
+  if ((self = [super init])) {
+    _condition = [[NSCondition alloc] init];
+  }
+
+  return self;
+}
+
+- (void)dealloc
+{
+  [self stop];
+  [_condition release];
+  [super dealloc];
+}
+
 - (void)start
 {
+  if (_thread) {
+    return;
+  }
+
   _thread = [[NSThread alloc] initWithTarget:self
                                     selector:@selector(threadProc:)
                                       object:nil];
-  _condition = [[NSCondition alloc] init];
 
   [_condition lock];
   [_thread start];
@@ -29,14 +48,19 @@
 
 - (void)stop
 {
+  if (!_thread) {
+    return;
+  }
+
   [_condition lock];
-  [_thread cancel];
   [self performSelector:@selector(_stop)
                onThread:_thread
              withObject:nil
           waitUntilDone:NO];
   [_condition wait];
   [_condition unlock];
+  [_thread release];
+  _thread = nil;
 
   NSLog(@"thread should have stopped");
 }
@@ -49,7 +73,9 @@ static void DoNothingRunLoopCallback(void *info)
 
 - (void)threadProc:(id)object
 {
-  @autoreleasepool {
+  NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+
+  {
     CFRunLoopSourceContext context = {0};
     context.perform = DoNothingRunLoopCallback;
 
@@ -61,19 +87,24 @@ static void DoNothingRunLoopCallback(void *info)
     NSLog(@"thread has started");
     [_condition unlock];
 
-    while (![[NSThread currentThread] isCancelled]) {
-      [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                               beforeDate:[NSDate distantFuture]];
-    }
+    // Keep processing events until the runloop is stopped.
+    CFRunLoopRun();
 
     CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
     CFRelease(source);
+
+    // Release all accumulated resources, but make sure NSCondition has the
+    // right environment.
+    [pool drain];
+    pool = [[NSAutoreleasePool alloc] init];
 
     [_condition lock];
     [_condition signal];
     NSLog(@"thread has stopped");
     [_condition unlock];
   }
+
+  [pool drain];
 }
 
 - (void)_stop
